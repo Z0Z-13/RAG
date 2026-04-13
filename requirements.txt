@@ -1,0 +1,11 @@
+langchain
+langchain-community
+langchain-huggingface
+chromadb
+transformers
+torch
+sentence-transformers
+tk
+
+TinyLlama (2GB)
+embeddings model (≈ 100MB)
