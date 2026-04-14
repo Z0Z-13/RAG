@@ -4,19 +4,21 @@ from tkinter.filedialog import askopenfilename
 
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_community.vectorstores import Chroma
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 
 
 # =========================
-# Cache (use E drive)
+# Cache
 # =========================
 os.environ["HF_HOME"] = "E:\\hf_cache"
-os.environ["TRANSFORMERS_CACHE"] = "E:\\hf_cache"
-os.environ["HUGGINGFACE_HUB_CACHE"] = "E:\\hf_cache"
 
 
 # =========================
@@ -28,7 +30,6 @@ file_path = askopenfilename()
 print("Selected file:", file_path)
 
 if not file_path:
-    print("No file selected")
     exit()
 
 
@@ -42,11 +43,10 @@ if ext == ".pdf":
 elif ext == ".docx":
     loader = Docx2txtLoader(file_path)
 else:
-    print("Unsupported file type")
+    print("Unsupported file")
     exit()
 
 docs = loader.load()
-print(f"Documents loaded: {len(docs)}")
 
 
 # =========================
@@ -58,14 +58,11 @@ splitter = RecursiveCharacterTextSplitter(
 )
 
 chunks = splitter.split_documents(docs)
-print(f"Chunks created: {len(chunks)}")
 
 
 # =========================
 # 4. Embeddings
 # =========================
-print("Loading embeddings...")
-
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -74,8 +71,6 @@ embeddings = HuggingFaceEmbeddings(
 # =========================
 # 5. Vector DB
 # =========================
-print("Building vector DB...")
-
 db = Chroma.from_documents(
     documents=chunks,
     embedding=embeddings,
@@ -86,10 +81,8 @@ retriever = db.as_retriever(search_kwargs={"k": 3})
 
 
 # =========================
-# 6. Load LLM (TinyLlama)
+# 6. LLM (Pipeline)
 # =========================
-print("Loading TinyLlama...")
-
 model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -100,57 +93,48 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float32
 )
 
+pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=200,
+    temperature=0.2,
+    repetition_penalty=1.1,
+    return_full_text=False
+)
 
-# =========================
-# 7. Build context
-# =========================
-def build_context(question):
-    docs = retriever.invoke(question)
-    return "\n\n".join([d.page_content for d in docs])
-
-
-# =========================
-# 8. Generate answer
-# =========================
-def generate_answer(prompt):
-    prompt = str(prompt)
-
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=200,
-            temperature=0.2,
-            repetition_penalty=1.1
-        )
-
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+llm = HuggingFacePipeline(pipeline=pipe)
 
 
 # =========================
-# 9. Ask function (RAG)
+# 7. Prompt
 # =========================
-def ask(question):
-    context = build_context(question)
-
-    prompt = f"""
-You are a smart assistant.
+template = """<|system|>
+Answer the question based ONLY on the context.
+If not found, say "I don't know".
 
 Context:
-{context}
+{context}</s>
+<|user|>
+{input}</s>
+<|assistant|>"""
 
-Question:
-{question}
-
-Answer:
-"""
-
-    return generate_answer(prompt)
+prompt = PromptTemplate.from_template(template)
 
 
 # =========================
-# 10. Chat loop
+# 8. RAG Chain
+# =========================
+rag_chain = (
+    {"context": retriever, "input": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+
+# =========================
+# 9. Chat
 # =========================
 print("\nChat ready (type 'exit' to quit)\n")
 
@@ -161,8 +145,8 @@ while True:
         print("Bye 👋")
         break
 
-    answer = ask(q)
+    response = rag_chain.invoke(q)
 
     print("\nBot:\n")
-    print(answer)
+    print(response)
     print("-" * 50)
